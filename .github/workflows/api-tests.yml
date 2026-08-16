@@ -1,0 +1,86 @@
+name: API Test Automation
+
+on:
+  push:
+    branches: [main]
+
+  pull_request:
+    branches: [main]
+
+  workflow_dispatch:
+
+
+concurrency:
+  group: api-tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Run API tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      TEST_USERNAME: ${{ secrets.TEST_USERNAME }}
+      TEST_PASSWORD: ${{ secrets.TEST_PASSWORD }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Verify required test credentials
+        shell: bash
+        run: |
+          if [[ -z "$TEST_USERNAME" || -z "$TEST_PASSWORD" ]]; then
+            echo "TEST_USERNAME and TEST_PASSWORD repository secrets are required."
+            exit 1
+          fi
+
+      - name: Run tests
+        run: python -m pytest -n auto
+
+      - name: Upload complete HTML report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: api-html-report-${{ github.run_number }}
+          path: reports/runs/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Prepare report email attachment
+        if: always()
+        id: email_report
+        shell: bash
+        run: |
+          if [[ -d "reports/runs" ]] && find reports/runs -type f -print -quit | grep -q .; then
+            zip -r api-html-report.zip reports/runs
+            dashboard="$(find reports/runs -type f -name main_report.html | sort | tail -n 1)"
+            python scripts/build_email_report.py "$dashboard" email-report.html
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Email complete HTML report
+        if: always() && steps.email_report.outputs.available == 'true'
+        uses: dawidd6/action-send-mail@v18
+        with:
+          server_address: ${{ secrets.SMTP_SERVER }}
+          server_port: ${{ secrets.SMTP_PORT }}
+          secure: true
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          subject: "API tests triggered by ${{ github.actor }}: ${{ job.status }}"
+          to: ${{ secrets.TEST_USER_EMAIL }}
+          from: ${{ secrets.REPORT_EMAIL_FROM }}
+          html_body: file://email-report.html
+          attachments: api-html-report.zip
